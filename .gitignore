@@ -1,1 +1,77 @@
+
+
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.db
+*.sqlite3
+
+# Virtual environments
+.env/
+.venv/
+venv/
+env/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+
+# -------------------------
+# Environment & Secrets
+# -------------------------
 .env
+*.env
+
+# Never commit API keys or tokens
+**/secrets.*
+**/secret.*
+**/config_local.*
+
+# -------------------------
+# Project Data (repos, indexes)
+# -------------------------
+data/repos/
+data/indexes/
+
+# If you generate logs or temp files
+logs/
+*.log
+tmp/
+temp/
+
+# -------------------------
+# Streamlit
+# -------------------------
+.streamlit/
+
+# -------------------------
+# OS-specific
+# -------------------------
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Linux
+*.swp
+*.swo
+
+# -------------------------
+# Git
+# -------------------------
+.git/
+.gitignore
+
+# -------------------------
+# Dependencies (optional)
+# -------------------------
+# Uncomment if you vendor packages
+# site-packages/
+# vendor/
