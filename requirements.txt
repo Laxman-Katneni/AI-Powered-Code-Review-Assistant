@@ -2,5 +2,10 @@ streamlit
 openai
 python-dotenv
 gitpython
-faiss-cpu
 requests
+
+# Vector store + LLM plumbing
+langchain
+langchain-community
+langchain-openai
+chromadb
