@@ -1,0 +1,6 @@
+streamlit
+openai
+python-dotenv
+gitpython
+faiss-cpu
+requests
