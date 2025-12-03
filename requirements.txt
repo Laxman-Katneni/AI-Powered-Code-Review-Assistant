@@ -8,4 +8,6 @@ requests
 langchain
 langchain-community
 langchain-openai
+langchain-chroma
 chromadb
+
