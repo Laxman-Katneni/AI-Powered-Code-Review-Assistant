@@ -26,6 +26,7 @@ DEFAULT_ALLOWED_EXTS = {
     ".cs",
     ".php",
     ".scala",
+    ".txt",
 }
 
 # Recursively listing code files under repo_root, applying basic filters

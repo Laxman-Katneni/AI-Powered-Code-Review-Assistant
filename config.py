@@ -28,6 +28,9 @@ def validate_config():
     if not OPENAI_API_KEY:
         missing.append("OPENAI_API_KEY")
     # GITHUB_TOKEN is optional later when OAuth is in place
+    if not GITHUB_TOKEN:
+        missing.append("GITHUB_TOKEN (fine-grained PAT for Phase 2)")
+
 
     if missing:
         raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")

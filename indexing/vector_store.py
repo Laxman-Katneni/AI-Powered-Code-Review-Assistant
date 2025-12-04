@@ -40,7 +40,6 @@ def build_index(repo_id: str, chunks: List[CodeChunk])->Chroma:
         embedding = embeddings,
         persist_directory = str(persist_dir)
     )
-    vectordb.persist()
     return vectordb
 
 """
