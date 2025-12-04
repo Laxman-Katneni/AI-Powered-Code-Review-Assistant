@@ -1,7 +1,14 @@
 import streamlit as st
-from config import validate_config
-
 from pathlib import Path
+
+from auth.github_auth import (
+    generate_state,
+    get_authorize_url,
+    exchange_code_for_token,
+    get_user,
+    get_user_repos,
+)
+from config import validate_config
 from ingestion.file_discovery import list_code_files
 from ingestion.parser import chunk_repository
 from indexing.vector_store import build_index, load_index
@@ -34,95 +41,116 @@ def main():
     st.title("AI Code Review Assistant (Phase 1: Local Repo RAG)")
     st.write("Welcome! This is the starting point for your codebase assistant")
 
-    st.sidebar.header("Repository Source")
-    mode = st.sidebar.radio("Select source", ["GitHub", "Local"], index=0)
-
-    # st.markdown("### Phase 0: Scaffolding")
-    # st.write(
-    #     "Right now, the app is just a skeleton. "
-    #     "Next phases will add:\n"
-    #     "- GitHub repo input\n"
-    #     "- Code ingestion & chunking\n"
-    #     "- Vector indexing\n"
-    #     "- Q&A over the codebase"
-    # )
-
-    repo_id = None
-    local_repo_root: Path | None = None
-
-    if mode == "Local":
-        # -------- Local mode (Phase 1) --------
-
-        local_path_str = st.sidebar.text_input(
-            "Local repo path",
-            value=".",
-            help="Absolute or relative path to a local Git repo.",
-        )
-        repo_id = f"local::{Path(local_path_str).resolve()}"
-
-        index_col, _ = st.sidebar.columns([1, 1])
-        with index_col:
-            if st.button("Index / Reindex Repo"):
-                repo_root = Path(local_path_str).resolve()
-                if not repo_root.exists():
-                    st.error(f"Path does not exist: {repo_root}")
-                else:
-                    with st.spinner("Indexing repo..."):
-                        files = list_code_files(repo_root)
-                        chunks = chunk_repository(repo_id, files)
-                        
-                        for ch in chunks:
-                            try:
-                                ch.file_path = str(Path(ch.file_path).relative_to(repo_root))
-                            except ValueError:
-                                # If for some reason it's not under repo_root, just keep as-is
-                                pass
-                        build_index(repo_id, chunks)
-                    st.success("Index built successfully ✅")
-        local_repo_root = Path(local_path_str).resolve()
+    # --- Session state setup ---
+    if "gh_access_token" not in st.session_state:
+        st.session_state.gh_access_token = None
+    if "gh_user" not in st.session_state:
+        st.session_state.gh_user = None
+    if "gh_state" not in st.session_state:
+        st.session_state.gh_state = None
     
-    else:
-        # -------- GitHub mode (Phase 2) --------
-        owner = st.sidebar.text_input("GitHub owner", placeholder="e.g. luckykatneni")
-        name = st.sidebar.text_input("GitHub repo", placeholder="e.g. sample-repo")
-        repo_id = f"github::{owner}/{name}" if owner and name else None
+    # --- Handle OAuth callback ---
+    query_params = st.query_params
 
-        if st.sidebar.button("Fetch & Index from GitHub"):
-            if not owner or not name:
-                st.error("Please provide both owner and repo name.")
-            else:
-                try:
-                    with st.spinner("Cloning/updating repo from GitHub..."):
-                        local_path, commit_hash = clone_or_update_repo(owner, name)
-                        # You could store commit_hash somewhere or pass into chunk metadata later
-                        files = list_code_files(local_path)
-                        chunks = chunk_repository(repo_id, files)
-                        for ch in chunks:
-                            try:
-                                ch.file_path = str(Path(ch.file_path).relative_to(local_path))
-                            except ValueError:
-                                # If for some reason it's not under repo_root, just keep as-is
-                                pass
+    if "code" in query_params and st.session_state.gh_access_token is None:
+        code = query_params["code"]
+        returned_state = query_params.get("state")
+
+        if st.session_state.gh_state and returned_state != st.session_state.gh_state:
+            st.error("State mismatch during GitHub OAuth. Please try logging in again.")
+        else:
+            try:
+                access_token = exchange_code_for_token(code)
+                user = get_user(access_token)
+                st.session_state.gh_access_token = access_token
+                st.session_state.gh_user = user
+
+                # Clear query params so refresh URL looks clean
+                st.query_params = {}
+
+                st.success(f"Logged in as {user.login}")
+
+            except Exception as e:
+                st.error(f"GitHub OAuth failed: {e}")
 
 
-                        # Attach commit hash into metadata for each chunk if you want:
-                        for ch in chunks:
-                            ch.metadata["commit_hash"] = commit_hash
-                        build_index(repo_id, chunks)
-                    st.success(f"GitHub repo indexed successfully ✅ (HEAD {commit_hash[:7]})")
-                    local_repo_root = local_path
-                except Exception as e:
-                    st.error(f"Failed to fetch/index repo: {e}") 
+    st.sidebar.header("GitHub")
 
-    if not repo_id:
-        st.info("Select a repo source and index a repo to begin.")
+    # --- If not logged in, show login button ---
+    if not st.session_state.gh_access_token:
+        st.sidebar.write("Connect your GitHub account to index your repos.")
+
+        if st.sidebar.button("Login with GitHub"):
+            state = generate_state()
+            st.session_state.gh_state = state
+            auth_url = get_authorize_url(state)
+            st.markdown(
+                f'<meta http-equiv="refresh" content="0; url={auth_url}"/>',
+                unsafe_allow_html=True,
+            )
+        st.info("Log in with GitHub to continue.")
         st.stop()
+    
+    # If logged in:
+    gh_user = st.session_state.gh_user
+    st.sidebar.success(f"Logged in as {gh_user.login}")
+
+    # Logout option
+    if st.sidebar.button("Logout"):
+        # st.session_state.gh_access_token = None
+        # st.session_state.gh_user = None
+        # st.session_state.gh_state = None
+
+        # Completely remove GitHub-related keys from session_state
+        for key in ["gh_access_token", "gh_user", "gh_state"]:
+            if key in st.session_state:
+                del st.session_state[key]
+        # Clear query params in the URL
+        st.query_params = {}
+        # Rerun the app with a clean state
+        st.rerun()
+
+    # --- Repo selection ---
+    access_token = st.session_state.gh_access_token
+    repos = get_user_repos(access_token)
+    repo_options = [r["full_name"] for r in repos]  # e.g. "owner/name"
+
+    if not repo_options:
+        st.warning("No repositories found for this GitHub user.")
+        st.stop()
+    
+    selected_full_name = st.sidebar.selectbox("Select a repo", repo_options)
+    owner, name = selected_full_name.split("/")
+    repo_id = f"github::{selected_full_name}"
+
+
+    if st.sidebar.button("Fetch & Index selected repo"):
+        try:
+            with st.spinner("Cloning/updating & indexing repo..."):
+                local_path, commit_hash = clone_or_update_repo(owner, name, access_token)
+                files = list_code_files(local_path)
+                chunks = chunk_repository(repo_id, files)
+
+                # Optionally normalize paths to be relative to repo root
+                for ch in chunks:
+                    try:
+                        ch.file_path = str(Path(ch.file_path).relative_to(local_path))
+                    except ValueError:
+                        pass
+                    ch.metadata["commit_hash"] = commit_hash
+
+                build_index(repo_id, chunks)
+            st.success(f"Indexed {selected_full_name} @ {commit_hash[:7]} ✅")
+        except Exception as e:
+            st.error(f"Failed to fetch/index repo: {e}")
+
 
     indexed = ensure_index_exists(repo_id)
     if not indexed:
         st.info("Index this repo first using the sidebar.")
         st.stop()
 
+    # --- Main chat UI ---
     st.markdown("### Ask a question about this repo")
     question = st.text_input("Question", placeholder="e.g. Where is user authentication implemented?")
     if st.button("Ask") and question.strip():
