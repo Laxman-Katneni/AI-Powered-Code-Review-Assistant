@@ -14,7 +14,9 @@ from ingestion.parser import chunk_repository
 from indexing.vector_store import build_index, load_index
 from retrieval.retriever import retrieve_chunks
 from llm.chat_llm import answer_with_rag
-from ingestion.github_client import clone_or_update_repo
+from indexing.index_metadata import save_index_metadata, load_index_metadata
+from ingestion.github_client import clone_or_update_repo, get_repo_local_path
+
 
 
 def ensure_index_exists(repo_id: str) -> bool:
@@ -33,7 +35,7 @@ def main():
         st.stop()
 
     st.set_page_config(
-        page_title="AI Code Review Assistant",
+        page_title="AI Code Review Assistant - GitHub RAG",
         layout="wide",
     )
 
@@ -135,6 +137,7 @@ def main():
     owner, name = selected_full_name.split("/")
     repo_id = f"github::{selected_full_name}"
 
+    # --- Indexing Block ---
     if st.sidebar.button("Fetch & Index selected repo"):
         try:
             with st.spinner("Cloning/updating & indexing repo..."):
@@ -151,6 +154,13 @@ def main():
                     ch.metadata["commit_hash"] = commit_hash
 
                 build_index(repo_id, chunks)
+                # Save index metadata
+                save_index_metadata(
+                    repo_id,
+                    file_count=len(files),
+                    chunk_count=len(chunks),
+                    commit_hash=commit_hash,
+                )
             st.success(f"Indexed {selected_full_name} @ {commit_hash[:7]} ✅")
         except Exception as e:
             st.error(f"Failed to fetch/index repo: {e}")
@@ -160,16 +170,55 @@ def main():
         st.info("Index this repo first using the sidebar.")
         st.stop()
 
+    # Show index status
+    meta = load_index_metadata(repo_id)
+    if meta:
+        commit = meta.get("commit_hash")
+        commit_str = f"@ {commit[:7]}" if commit else ""
+        st.caption(
+            f"Repo: {selected_full_name} {commit_str} • "
+            f"Files indexed: {meta.get('file_count', '?')} • "
+            f"Chunks: {meta.get('chunk_count', '?')} • "
+            f"Indexed at: {meta.get('indexed_at', '')}"
+        )
+    else:
+        st.caption(f"Repo: {selected_full_name} • Index metadata unavailable")
+
     # --- Main chat UI ---
     st.markdown("### Ask a question about this repo")
+    st.markdown(
+        "_Example questions:_ "
+        "`Where is the main entrypoint?`, "
+        "`How does authentication work?`, "
+        "`Where are database models defined?`"
+    )
     question = st.text_input(
         "Question",
         placeholder="e.g. Where is user authentication implemented?",
     )
+
     if st.button("Ask") and question.strip():
         with st.spinner("Thinking..."):
             retrieved = retrieve_chunks(repo_id, question, k=6)
-            answer = answer_with_rag(question, retrieved)
+
+            if not retrieved:
+                st.warning("I couldn't find any relevant code snippets for that question.")
+                return
+
+            # Simple distance-based filter (Chroma returns smaller = closer)
+            MAX_DISTANCE = 2
+            filtered = [r for r in retrieved if r["score"] < MAX_DISTANCE]
+
+            if not filtered:
+                st.warning(
+                    "I found code, but none of it seemed strongly related. "
+                    "Try rephrasing or being more specific."
+                )
+                return
+
+            answer = answer_with_rag(question, filtered)
+            used_chunks = filtered
+
 
         st.markdown("#### Answer")
         st.write(answer)
@@ -177,15 +226,63 @@ def main():
         st.markdown("#### Sources")
 
         seen = set()
-        for r in retrieved:
+        sources = []
+        for r in used_chunks:
             meta = r["metadata"]
             key = (meta["file_path"], meta["start_line"], meta["end_line"])
             if key in seen:
                 continue
             seen.add(key)
-            st.write(
-                f"- `{meta['file_path']}` (lines {meta['start_line']}-{meta['end_line']})"
+            sources.append(meta)
+
+        # GitHub links (assuming main branch by default, Later - override in sidebar if you want)
+        branch = st.sidebar.text_input("Branch to link (for Sources)", value="main", key="branch_input")
+
+        # Base repo URL for GitHub
+        github_base = f"https://github.com/{owner}/{name}/blob/{branch}"
+
+        for meta in sources:
+            file_path = meta["file_path"]
+            start = meta["start_line"]
+            end = meta["end_line"]
+            url = f"{github_base}/{file_path}#L{start}-L{end}"
+            st.markdown(
+                f"- [{file_path} (lines {start}-{end})]({url})",
+                unsafe_allow_html=False,
             )
+
+                # ✅ Code viewer: let user pick a source to inspect
+        st.markdown("#### View source code")
+
+        if sources:
+            options = [
+                f"{m['file_path']} (lines {m['start_line']}-{m['end_line']})"
+                for m in sources
+            ]
+            selected_option = st.selectbox(
+                "Select a source to view",
+                options,
+            )
+
+            # Map back to metadata
+            selected_meta = sources[options.index(selected_option)]
+
+            # Locate the file in the local cloned repo
+            local_repo_path = get_repo_local_path(owner, name)
+            file_path = Path(local_repo_path) / selected_meta["file_path"]
+
+            try:
+                code_text = file_path.read_text(encoding="utf-8", errors="ignore")
+            except FileNotFoundError:
+                st.error(f"Could not read file: {file_path}")
+                code_text = ""
+
+            st.code(
+                code_text,
+                language=selected_meta.get("language", "text"),
+            )
+        else:
+            st.caption("No sources available to display.")
 
 
 if __name__ == "__main__":
