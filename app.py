@@ -17,6 +17,12 @@ from llm.chat_llm import answer_with_rag
 from indexing.index_metadata import save_index_metadata, load_index_metadata
 from ingestion.github_client import clone_or_update_repo, get_repo_local_path
 
+from auth.github_pr_client import list_pull_requests, get_pull_request_files
+from pr.diff_ingestion import build_diff_chunks_from_github_files
+from pr.review_service import run_pr_review
+from metrics.store import save_review_run, load_review_runs
+from pr.models import PRInfo, ReviewComment
+
 
 
 def ensure_index_exists(repo_id: str) -> bool:
@@ -165,124 +171,164 @@ def main():
         except Exception as e:
             st.error(f"Failed to fetch/index repo: {e}")
 
+        # Ensure index exists for this repo (for Q&A + context)
     indexed = ensure_index_exists(repo_id)
     if not indexed:
         st.info("Index this repo first using the sidebar.")
         st.stop()
 
-    # Show index status
-    meta = load_index_metadata(repo_id)
-    if meta:
-        commit = meta.get("commit_hash")
-        commit_str = f"@ {commit[:7]}" if commit else ""
-        st.caption(
-            f"Repo: {selected_full_name} {commit_str} • "
-            f"Files indexed: {meta.get('file_count', '?')} • "
-            f"Chunks: {meta.get('chunk_count', '?')} • "
-            f"Indexed at: {meta.get('indexed_at', '')}"
+    # Load index metadata if you added Phase 4 pieces (optional)
+    # ...
+
+    # TABS: Code Q&A, PR Review, Quality Dashboard
+    tab_chat, tab_pr, tab_dashboard = st.tabs(["💬 Code Q&A", "🔍 PR Review", "📊 Quality Dashboard"])
+
+    # ------------------------
+    # Tab 1: Code Q&A (your existing logic)
+    # ------------------------
+    with tab_chat:
+        st.markdown("### Ask a question about this repo")
+        question = st.text_input(
+            "Question",
+            placeholder="e.g. Where is user authentication implemented?",
+            key="qna_question",
         )
-    else:
-        st.caption(f"Repo: {selected_full_name} • Index metadata unavailable")
+        if st.button("Ask", key="qna_ask") and question.strip():
+            with st.spinner("Thinking..."):
+                retrieved = retrieve_chunks(repo_id, question, k=6)
+                if not retrieved:
+                    st.warning("I couldn't find any relevant code snippets for that question.")
+                else:
+                    answer = answer_with_rag(question, retrieved)
 
-    # --- Main chat UI ---
-    st.markdown("### Ask a question about this repo")
-    st.markdown(
-        "_Example questions:_ "
-        "`Where is the main entrypoint?`, "
-        "`How does authentication work?`, "
-        "`Where are database models defined?`"
-    )
-    question = st.text_input(
-        "Question",
-        placeholder="e.g. Where is user authentication implemented?",
-    )
+                    st.markdown("#### Answer")
+                    st.write(answer)
 
-    if st.button("Ask") and question.strip():
-        with st.spinner("Thinking..."):
-            retrieved = retrieve_chunks(repo_id, question, k=6)
+                    st.markdown("#### Sources")
 
-            if not retrieved:
-                st.warning("I couldn't find any relevant code snippets for that question.")
-                return
+                    seen = set()
+                    for r in retrieved:
+                        meta = r["metadata"]
+                        key = (meta["file_path"], meta["start_line"], meta["end_line"])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        st.write(
+                            f"- `{meta['file_path']}` (lines {meta['start_line']}-{meta['end_line']})"
+                        )
 
-            # Simple distance-based filter (Chroma returns smaller = closer)
-            MAX_DISTANCE = 2
-            filtered = [r for r in retrieved if r["score"] < MAX_DISTANCE]
+    # ------------------------
+    # Tab 2: PR Review
+    # ------------------------
+    with tab_pr:
+        st.markdown("### AI PR Review")
 
-            if not filtered:
-                st.warning(
-                    "I found code, but none of it seemed strongly related. "
-                    "Try rephrasing or being more specific."
-                )
-                return
+        # List open PRs
+        try:
+            prs = list_pull_requests(owner, name, access_token)
+        except Exception as e:
+            st.error(f"Failed to list pull requests: {e}")
+            prs = []
 
-            answer = answer_with_rag(question, filtered)
-            used_chunks = filtered
-
-
-        st.markdown("#### Answer")
-        st.write(answer)
-
-        st.markdown("#### Sources")
-
-        seen = set()
-        sources = []
-        for r in used_chunks:
-            meta = r["metadata"]
-            key = (meta["file_path"], meta["start_line"], meta["end_line"])
-            if key in seen:
-                continue
-            seen.add(key)
-            sources.append(meta)
-
-        # GitHub links (assuming main branch by default, Later - override in sidebar if you want)
-        branch = st.sidebar.text_input("Branch to link (for Sources)", value="main", key="branch_input")
-
-        # Base repo URL for GitHub
-        github_base = f"https://github.com/{owner}/{name}/blob/{branch}"
-
-        for meta in sources:
-            file_path = meta["file_path"]
-            start = meta["start_line"]
-            end = meta["end_line"]
-            url = f"{github_base}/{file_path}#L{start}-L{end}"
-            st.markdown(
-                f"- [{file_path} (lines {start}-{end})]({url})",
-                unsafe_allow_html=False,
-            )
-
-                # ✅ Code viewer: let user pick a source to inspect
-        st.markdown("#### View source code")
-
-        if sources:
-            options = [
-                f"{m['file_path']} (lines {m['start_line']}-{m['end_line']})"
-                for m in sources
-            ]
-            selected_option = st.selectbox(
-                "Select a source to view",
-                options,
-            )
-
-            # Map back to metadata
-            selected_meta = sources[options.index(selected_option)]
-
-            # Locate the file in the local cloned repo
-            local_repo_path = get_repo_local_path(owner, name)
-            file_path = Path(local_repo_path) / selected_meta["file_path"]
-
-            try:
-                code_text = file_path.read_text(encoding="utf-8", errors="ignore")
-            except FileNotFoundError:
-                st.error(f"Could not read file: {file_path}")
-                code_text = ""
-
-            st.code(
-                code_text,
-                language=selected_meta.get("language", "text"),
-            )
+        if not prs:
+            st.info("No open pull requests found for this repo.")
         else:
-            st.caption("No sources available to display.")
+            pr_labels = [f"#{pr.number} – {pr.title} (by {pr.author})" for pr in prs]
+            selected_idx = st.selectbox("Select a PR to review", list(range(len(prs))), format_func=lambda i: pr_labels[i])
+            selected_pr: PRInfo = prs[selected_idx]
+
+            if st.button("Run AI Review", key="run_pr_review"):
+                with st.spinner("Running AI code review..."):
+                    try:
+                        files_json = get_pull_request_files(owner, name, selected_pr.number, access_token)
+                        diff_chunks = build_diff_chunks_from_github_files(selected_pr.repo_id, selected_pr.number, files_json)
+                        summary_text, comments = run_pr_review(repo_id, owner, name, selected_pr, diff_chunks)
+
+                        # Save metrics
+                        save_review_run(repo_id, selected_pr.number, summary_text, comments)
+
+                        st.subheader("AI Review Summary")
+                        st.write(summary_text)
+
+                        st.subheader("Review Comments")
+                        if not comments:
+                            st.write("No significant issues found by the AI reviewer.")
+                        else:
+                            # Group by file
+                            comments_by_file = {}
+                            for c in comments:
+                                comments_by_file.setdefault(c.file_path, []).append(c)
+
+                            for file_path, file_comments in comments_by_file.items():
+                                st.markdown(f"**{file_path}**")
+                                for c in file_comments:
+                                    st.markdown(
+                                        f"- Line {c.line} "
+                                        f"[{c.severity.upper()} / {c.category}] — {c.body}\n\n"
+                                        f"  _Why_: {c.rationale}"
+                                        + (f"\n\n  _Suggestion_: {c.suggestion}" if c.suggestion else "")
+                                    )
+
+                            # Optional: copy-friendly version
+                            st.markdown("#### Copy all comments (Markdown)")
+                            md_lines = []
+                            md_lines.append(f"AI Review for PR #{selected_pr.number} – {selected_pr.title}\n")
+                            for c in comments:
+                                md_lines.append(
+                                    f"- **{c.file_path}:{c.line}** "
+                                    f"[{c.severity.upper()}/{c.category}] – {c.body}"
+                                )
+                            st.code("\n".join(md_lines), language="markdown")
+
+                    except Exception as e:
+                        st.error(f"Failed to run PR review: {e}")
+
+    # ------------------------
+    # Tab 3: Quality Dashboard
+    # ------------------------
+    with tab_dashboard:
+        st.markdown("### Code Quality Dashboard")
+
+        from metrics.store import load_review_runs
+        runs = load_review_runs(repo_id)
+
+        if not runs:
+            st.info("No PR reviews recorded yet. Run an AI review in the 'PR Review' tab first.")
+        else:
+            # Simple metrics
+            import pandas as pd
+
+            df = pd.DataFrame(
+                [
+                    {
+                        "created_at": r.created_at,
+                        "pr_number": r.pr_number,
+                        "comment_count": r.comment_count,
+                        "critical": r.stats.get("by_severity", {}).get("critical", 0),
+                        "warning": r.stats.get("by_severity", {}).get("warning", 0),
+                        "info": r.stats.get("by_severity", {}).get("info", 0),
+                        "security": r.stats.get("by_category", {}).get("security", 0),
+                        "architecture": r.stats.get("by_category", {}).get("architecture", 0),
+                    }
+                    for r in runs
+                ]
+            ).sort_values("created_at")
+
+            st.subheader("Overview")
+            st.metric("Total PRs reviewed", len(df))
+            st.metric("Avg comments per PR", round(df["comment_count"].mean(), 2))
+            st.metric("Total critical issues", int(df["critical"].sum()))
+            st.metric("Security issues (all time)", int(df["security"].sum()))
+
+            st.subheader("Comments per PR over time")
+            st.line_chart(df.set_index("created_at")[["comment_count"]])
+
+            st.subheader("Critical issues over time")
+            st.line_chart(df.set_index("created_at")[["critical"]])
+
+            st.subheader("Security vs Architecture (total)")
+            st.bar_chart(df[["security", "architecture"]].sum())
+
 
 
 if __name__ == "__main__":
