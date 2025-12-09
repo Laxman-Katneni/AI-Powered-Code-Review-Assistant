@@ -22,8 +22,10 @@ from pr.diff_ingestion import build_diff_chunks_from_github_files
 from pr.review_service import run_pr_review
 from metrics.store import save_review_run, load_review_runs
 from pr.models import PRInfo, ReviewComment
+import pandas as pd
+from typing import Optional, Dict, Any, List
 
-
+# ------------- Helpers -------------
 
 def ensure_index_exists(repo_id: str) -> bool:
     try:
@@ -31,6 +33,8 @@ def ensure_index_exists(repo_id: str) -> bool:
         return True
     except FileNotFoundError:
         return False
+
+# ------------- Main App -------------
 
 def main():
     # Validate config - Error early if any API Key is missing
@@ -143,6 +147,14 @@ def main():
     owner, name = selected_full_name.split("/")
     repo_id = f"github::{selected_full_name}"
 
+    # Branch for GitHub links (used in Code Q&A Sources)
+    branch = st.sidebar.text_input(
+        "Branch for GitHub links",
+        value="main",
+        key="branch_input",
+        help="Used for building GitHub links in the Code Q&A sources section.",
+    )
+
     # --- Indexing Block ---
     if st.sidebar.button("Fetch & Index selected repo"):
         try:
@@ -151,7 +163,7 @@ def main():
                 files = list_code_files(local_path)
                 chunks = chunk_repository(repo_id, files)
 
-                # Optionally normalize paths to be relative to repo root
+                # Normalize paths to be relative to repo root
                 for ch in chunks:
                     try:
                         ch.file_path = str(Path(ch.file_path).relative_to(local_path))
@@ -171,14 +183,26 @@ def main():
         except Exception as e:
             st.error(f"Failed to fetch/index repo: {e}")
 
-        # Ensure index exists for this repo (for Q&A + context)
+    # Ensure index exists for this repo (for Q&A + context)
     indexed = ensure_index_exists(repo_id)
     if not indexed:
         st.info("Index this repo first using the sidebar.")
         st.stop()
 
-    # Load index metadata if you added Phase 4 pieces (optional)
-    # ...
+    # Load index metadata 
+    # Show index status (Phase 4)
+    meta = load_index_metadata(repo_id)
+    if meta:
+        commit = meta.get("commit_hash")
+        commit_str = f"@ {commit[:7]}" if commit else ""
+        st.caption(
+            f"Repo: {selected_full_name} {commit_str} • "
+            f"Files indexed: {meta.get('file_count', '?')} • "
+            f"Chunks: {meta.get('chunk_count', '?')} • "
+            f"Indexed at: {meta.get('indexed_at', '')}"
+        )
+    else:
+        st.caption(f"Repo: {selected_full_name} • Index metadata unavailable")
 
     # TABS: Code Q&A, PR Review, Quality Dashboard
     tab_chat, tab_pr, tab_dashboard = st.tabs(["💬 Code Q&A", "🔍 PR Review", "📊 Quality Dashboard"])
@@ -193,29 +217,98 @@ def main():
             placeholder="e.g. Where is user authentication implemented?",
             key="qna_question",
         )
+        st.markdown(
+            "_Example questions:_ "
+            "`Where is the main entrypoint?`, "
+            "`How does authentication work?`, "
+            "`Where are database models defined?`"
+        )
+
         if st.button("Ask", key="qna_ask") and question.strip():
             with st.spinner("Thinking..."):
                 retrieved = retrieve_chunks(repo_id, question, k=6)
                 if not retrieved:
                     st.warning("I couldn't find any relevant code snippets for that question.")
                 else:
-                    answer = answer_with_rag(question, retrieved)
+                    # Simple guardrail: filter by distance/score if available
+                    MAX_DISTANCE = 2
+                    filtered: List[dict] = []
+                    for r in retrieved:
+                        score = r.get("score", 0.0)
+                        if score < MAX_DISTANCE:
+                            filtered.append(r)
+
+                    if not filtered:
+                        st.warning(
+                            "I found some code, but none of it looked strongly related. "
+                            "Try rephrasing your question or being more specific."
+                        )
+                        st.stop()
+
+                    answer = answer_with_rag(question, filtered)
+                    used_chunks = filtered
+
 
                     st.markdown("#### Answer")
                     st.write(answer)
 
+                    # Build Sources list
                     st.markdown("#### Sources")
 
                     seen = set()
-                    for r in retrieved:
-                        meta = r["metadata"]
-                        key = (meta["file_path"], meta["start_line"], meta["end_line"])
+                    sources_meta = []
+                    for r in used_chunks:
+                        meta_r = r["metadata"]
+                        key = (meta_r["file_path"], meta_r["start_line"], meta_r["end_line"])
                         if key in seen:
                             continue
                         seen.add(key)
-                        st.write(
-                            f"- `{meta['file_path']}` (lines {meta['start_line']}-{meta['end_line']})"
+                        sources_meta.append(meta_r)
+                    
+                    # GitHub links for sources
+                    github_base = f"https://github.com/{owner}/{name}/blob/{branch}"
+                    for meta_r in sources_meta:
+                        fp = meta_r["file_path"]
+                        start = meta_r["start_line"]
+                        end = meta_r["end_line"]
+                        url = f"{github_base}/{fp}#L{start}-L{end}"
+                        st.markdown(
+                            f"- [{fp} (lines {start}-{end})]({url})",
+                            unsafe_allow_html=False,
                         )
+                    
+                    # Code viewer
+                    st.markdown("#### View source code")
+
+                    if sources_meta:
+                        options = [
+                            f"{m['file_path']} (lines {m['start_line']}-{m['end_line']})"
+                            for m in sources_meta
+                        ]
+                        selected_option = st.selectbox(
+                            "Select a source to view",
+                            options,
+                            key="source_view_select",
+                        )
+
+                        selected_meta = sources_meta[options.index(selected_option)]
+
+                        local_repo_path = get_repo_local_path(owner, name)
+                        file_path = Path(local_repo_path) / selected_meta["file_path"]
+
+                        try:
+                            code_text = file_path.read_text(encoding="utf-8", errors="ignore")
+                        except FileNotFoundError:
+                            st.error(f"Could not read file: {file_path}")
+                            code_text = ""
+
+                        st.code(
+                            code_text,
+                            language=selected_meta.get("language", "text"),
+                        )
+                    else:
+                        st.caption("No sources available to display.")
+                    
 
     # ------------------------
     # Tab 2: PR Review
@@ -296,7 +389,7 @@ def main():
             st.info("No PR reviews recorded yet. Run an AI review in the 'PR Review' tab first.")
         else:
             # Simple metrics
-            import pandas as pd
+            
 
             df = pd.DataFrame(
                 [

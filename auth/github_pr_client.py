@@ -9,7 +9,7 @@ from pr.models import PRInfo
 
 GITHUB_API_BASE = "https://api.github.com"
 
-
+# returns the auth info to put in request headerr
 def _auth_headers(access_token: str) -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {access_token}",
@@ -19,6 +19,11 @@ def _auth_headers(access_token: str) -> Dict[str, str]:
 
 
 # List open pull requests for a repo, sorted by most recently updated
+"""
+list_pull_requests(owner, repo, access_token)
+Calls: GET /repos/{owner}/{repo}/pulls?state=open
+Returns List[PRInfo]
+"""
 def list_pull_requests(owner: str, repo: str, access_token: str) -> List[PRInfo]:
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
     params = {"state": "open", "sort": "updated", "direction": "desc"}
@@ -47,7 +52,15 @@ def list_pull_requests(owner: str, repo: str, access_token: str) -> List[PRInfo]
     return pr_list
 
 
-# Return the list of files in a PR, including diffs (patch).
+# Return the list of files in a PR, including diffs (patch)
+"""
+Calls: GET /repos/{owner}/{repo}/pulls/{number}/files
+Each file JSON includes:
+filename
+status
+patch (unified diff text)
+This is the raw material for DiffChunk
+"""
 def get_pull_request_files(owner: str, repo: str, pr_number: int, access_token: str) -> List[Dict[str, Any]]:
 
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/files"

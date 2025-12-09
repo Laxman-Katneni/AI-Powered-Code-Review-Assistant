@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 
-
+# pr metadata
 @dataclass
 class PRInfo:
     repo_id: str          # e.g. "owner/name"
@@ -16,7 +16,7 @@ class PRInfo:
     head_branch: str
     body: Optional[str] = None
 
-
+# code changes
 @dataclass
 class DiffChunk:
     id: str

@@ -11,6 +11,10 @@ from metrics.models import ReviewRun
 from pr.models import ReviewComment
 
 
+from collections import Counter
+import uuid
+
+
 def _metrics_dir_for_repo(repo_id: str) -> Path:
     safe_repo = repo_id.replace("/", "__")
     d = DATA_DIR / "metrics" / safe_repo
@@ -22,17 +26,16 @@ def _reviews_path(repo_id: str) -> Path:
     return _metrics_dir_for_repo(repo_id) / "reviews.jsonl"
 
 
+
+# Append a review run record to the repo's JSONL file
+
 def save_review_run(
     repo_id: str,
     pr_number: int,
     summary: str,
     comments: List[ReviewComment],
 ) -> None:
-    """
-    Append a review run record to the repo's JSONL file.
-    """
-    from collections import Counter
-    import uuid
+
 
     now = datetime.now(timezone.utc).isoformat()
     by_severity = Counter(c.severity for c in comments)

@@ -3,6 +3,7 @@ openai
 python-dotenv
 gitpython
 requests
+pandas
 
 # Vector store + LLM plumbing
 langchain

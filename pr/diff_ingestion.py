@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Tuple
 from pr.models import DiffChunk
 
 """
-Very simple unified diff header parser.
+Very simple unified diff header parser
 Looks for first line starting with '@@' and parses the +c,d section as new_start/new_len.
 Returns (header_line, new_start, new_end).
 If parsing fails, returns ('', 1, 1).
