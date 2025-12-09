@@ -49,7 +49,7 @@ def main():
         layout="wide",
     )
 
-    st.title("AI Code Review Assistant (Phase 1: Local Repo RAG)")
+    st.title("AI Code Review Assistant")
     st.write("Welcome! This is the starting point for your codebase assistant")
 
     # --- Handle OAuth callback ---
@@ -212,6 +212,12 @@ def main():
     # ------------------------
     with tab_chat:
         st.markdown("### Ask a question about this repo")
+        # --- Session state for Q&A results ---
+        if "qa_answer" not in st.session_state:
+            st.session_state.qa_answer = None
+        if "qa_sources" not in st.session_state:
+            st.session_state.qa_sources = []
+
         question = st.text_input(
             "Question",
             placeholder="e.g. Where is user authentication implemented?",
@@ -248,15 +254,9 @@ def main():
                     answer = answer_with_rag(question, filtered)
                     used_chunks = filtered
 
-
-                    st.markdown("#### Answer")
-                    st.write(answer)
-
-                    # Build Sources list
-                    st.markdown("#### Sources")
-
                     seen = set()
                     sources_meta = []
+                    
                     for r in used_chunks:
                         meta_r = r["metadata"]
                         key = (meta_r["file_path"], meta_r["start_line"], meta_r["end_line"])
@@ -264,51 +264,69 @@ def main():
                             continue
                         seen.add(key)
                         sources_meta.append(meta_r)
-                    
-                    # GitHub links for sources
-                    github_base = f"https://github.com/{owner}/{name}/blob/{branch}"
-                    for meta_r in sources_meta:
-                        fp = meta_r["file_path"]
-                        start = meta_r["start_line"]
-                        end = meta_r["end_line"]
-                        url = f"{github_base}/{fp}#L{start}-L{end}"
-                        st.markdown(
-                            f"- [{fp} (lines {start}-{end})]({url})",
-                            unsafe_allow_html=False,
-                        )
-                    
-                    # Code viewer
-                    st.markdown("#### View source code")
 
-                    if sources_meta:
-                        options = [
-                            f"{m['file_path']} (lines {m['start_line']}-{m['end_line']})"
-                            for m in sources_meta
-                        ]
-                        selected_option = st.selectbox(
-                            "Select a source to view",
-                            options,
-                            key="source_view_select",
-                        )
+                    st.session_state.qa_answer = answer
+                    st.session_state.qa_sources = sources_meta
 
-                        selected_meta = sources_meta[options.index(selected_option)]
+        # ---- Render last answer + sources (SURVIVES reruns) ----
+        if st.session_state.qa_answer:
+            answer = st.session_state.qa_answer
+            sources_meta = st.session_state.qa_sources        
 
-                        local_repo_path = get_repo_local_path(owner, name)
-                        file_path = Path(local_repo_path) / selected_meta["file_path"]
+            st.markdown("#### Answer")
+            st.write(answer)
 
-                        try:
-                            code_text = file_path.read_text(encoding="utf-8", errors="ignore")
-                        except FileNotFoundError:
-                            st.error(f"Could not read file: {file_path}")
-                            code_text = ""
+            # Build Sources list
+            st.markdown("#### Sources")
 
-                        st.code(
-                            code_text,
-                            language=selected_meta.get("language", "text"),
-                        )
-                    else:
-                        st.caption("No sources available to display.")
-                    
+            
+            # GitHub links for sources
+            github_base = f"https://github.com/{owner}/{name}/blob/{branch}"
+            for meta_r in sources_meta:
+                fp = meta_r["file_path"]
+                start = meta_r["start_line"]
+                end = meta_r["end_line"]
+                url = f"{github_base}/{fp}#L{start}-L{end}"
+                st.markdown(
+                    f"- [{fp} (lines {start}-{end})]({url})",
+                    unsafe_allow_html=False,
+                )
+            
+            # Code viewer
+
+            
+            st.markdown("#### View source code")
+
+            if sources_meta:
+                options = [
+                    f"{m['file_path']} (lines {m['start_line']}-{m['end_line']})"
+                    for m in sources_meta
+                ]
+                selected_option = st.selectbox(
+                    "Select a source to view",
+                    options,
+                    key="source_view_select",
+                )
+
+                selected_meta = sources_meta[options.index(selected_option)]
+
+                local_repo_path = get_repo_local_path(owner, name)
+                file_path = Path(local_repo_path) / selected_meta["file_path"]
+
+                try:
+                    code_text = file_path.read_text(encoding="utf-8", errors="ignore")
+                except FileNotFoundError:
+                    st.error(f"Could not read file: {file_path}")
+                    code_text = ""
+
+                st.code(
+                    code_text,
+                    language=selected_meta.get("language", "text"),
+                )
+            else:
+                st.caption("No sources available to display.")
+        else:
+            st.info("Ask a question to see the answer, sources, and code viewer.")
 
     # ------------------------
     # Tab 2: PR Review
