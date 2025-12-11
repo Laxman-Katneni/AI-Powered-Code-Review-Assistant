@@ -57,7 +57,7 @@ def cosine_sim(a: list[float], b: list[float]) -> float:
 def main():
     # Validate config - Error early if any API Key is missing
     st.set_page_config(
-        page_title="AI Code Review Assistant - GitHub RAG",
+        page_title="AI Code Review Assistant",
         layout="wide",
     )
     try:
@@ -67,7 +67,7 @@ def main():
         st.stop()
 
 
-    st.title("AI Code Review Assistant")
+    st.title("RepoMind - An AI Code Review Assistant")
     st.write("Welcome! This is the starting point for your codebase assistant")
 
     # --- Handle OAuth callback ---
