@@ -17,13 +17,16 @@ from llm.chat_llm import answer_with_rag
 from indexing.index_metadata import save_index_metadata, load_index_metadata
 from ingestion.github_client import clone_or_update_repo, get_repo_local_path
 
-from auth.github_pr_client import list_pull_requests, get_pull_request_files
+from auth.github_pr_client import list_pull_requests, get_pull_request_files, post_pr_issue_comment
 from pr.diff_ingestion import build_diff_chunks_from_github_files
 from pr.review_service import run_pr_review
 from metrics.store import save_review_run, load_review_runs
 from pr.models import PRInfo, ReviewComment
 import pandas as pd
 from typing import Optional, Dict, Any, List
+from math import sqrt
+from llm.embeddings import embed_query
+
 
 # ------------- Helpers -------------
 
@@ -34,20 +37,31 @@ def ensure_index_exists(repo_id: str) -> bool:
     except FileNotFoundError:
         return False
 
+
+def cosine_sim(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two embedding vectors"""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sqrt(sum(x * x for x in a))
+    nb = sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
 # ------------- Main App -------------
 
 def main():
     # Validate config - Error early if any API Key is missing
+    st.set_page_config(
+        page_title="AI Code Review Assistant - GitHub RAG",
+        layout="wide",
+    )
     try:
         validate_config()
     except RuntimeError as e:
         st.error(str(e))
         st.stop()
 
-    st.set_page_config(
-        page_title="AI Code Review Assistant - GitHub RAG",
-        layout="wide",
-    )
 
     st.title("AI Code Review Assistant")
     st.write("Welcome! This is the starting point for your codebase assistant")
@@ -217,6 +231,19 @@ def main():
             st.session_state.qa_answer = None
         if "qa_sources" not in st.session_state:
             st.session_state.qa_sources = []
+        
+        # Semantic cache: list of dicts
+        # each entry:
+        # {
+        #   "repo_id": str,
+        #   "index_version": str,
+        #   "question": str,
+        #   "embedding": list[float],
+        #   "answer": str,
+        #   "sources": list[meta dict],
+        # }
+        if "qa_semantic_cache" not in st.session_state:
+            st.session_state.qa_semantic_cache = []
 
         question = st.text_input(
             "Question",
@@ -231,42 +258,97 @@ def main():
         )
 
         if st.button("Ask", key="qna_ask") and question.strip():
+            q_norm = question.strip()
             with st.spinner("Thinking..."):
-                retrieved = retrieve_chunks(repo_id, question, k=6)
-                if not retrieved:
-                    st.warning("I couldn't find any relevant code snippets for that question.")
-                else:
-                    # Simple guardrail: filter by distance/score if available
-                    MAX_DISTANCE = 2
-                    filtered: List[dict] = []
-                    for r in retrieved:
-                        score = r.get("score", 0.0)
-                        if score < MAX_DISTANCE:
-                            filtered.append(r)
+                # --- Determine index_version so cache is tied to current index ---
+                meta = load_index_metadata(repo_id)
+                index_version = meta.get("indexed_at") if meta else "no-index-meta"
 
-                    if not filtered:
-                        st.warning(
-                            "I found some code, but none of it looked strongly related. "
-                            "Try rephrasing your question or being more specific."
-                        )
-                        st.stop()
+                # --- 1) Try semantic cache first ---
+                cache = st.session_state.qa_semantic_cache
 
-                    answer = answer_with_rag(question, filtered)
-                    used_chunks = filtered
+                # Embed current question once
+                try:
+                    q_emb = embed_query(q_norm)
+                except Exception as e:
+                    st.warning(f"Failed to embed question, falling back to normal RAG. ({e})")
+                    q_emb = None
 
-                    seen = set()
-                    sources_meta = []
-                    
-                    for r in used_chunks:
-                        meta_r = r["metadata"]
-                        key = (meta_r["file_path"], meta_r["start_line"], meta_r["end_line"])
-                        if key in seen:
+                best_entry = None
+                best_sim = 0.0
+                SEMANTIC_THRESHOLD = 0.90  # tweak as needed
+
+                if q_emb is not None:
+                    for entry in cache:
+                        if entry["repo_id"] != repo_id:
                             continue
-                        seen.add(key)
-                        sources_meta.append(meta_r)
+                        if entry["index_version"] != index_version:
+                            continue
+                        sim = cosine_sim(q_emb, entry["embedding"])
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_entry = entry
+                if best_entry and best_sim >= SEMANTIC_THRESHOLD:
+                    # Serve from semantic cache
+                    st.info(f"Answer served from semantic cache (similarity {best_sim:.2f}).")
+                    st.session_state.qa_answer = best_entry["answer"]
+                    st.session_state.qa_sources = best_entry["sources"]
+                else:
+                    # --- 2) Fall back to normal RAG flow ---
+                    retrieved = retrieve_chunks(repo_id, question, k=6)
+                    if not retrieved:
+                        st.warning("I couldn't find any relevant code snippets for that question.")
+                    else:
+                        # Simple guardrail: filter by distance/score if available
+                        MAX_DISTANCE = 2
+                        filtered: List[dict] = []
+                        for r in retrieved:
+                            score = r.get("score", 0.0)
+                            if score < MAX_DISTANCE:
+                                filtered.append(r)
 
-                    st.session_state.qa_answer = answer
-                    st.session_state.qa_sources = sources_meta
+                        if not filtered:
+                            st.warning(
+                                "I found some code, but none of it looked strongly related. "
+                                "Try rephrasing your question or being more specific."
+                            )
+                            st.stop()
+
+                        answer = answer_with_rag(question, filtered)
+                        used_chunks = filtered
+
+                        seen = set()
+                        sources_meta = []
+
+                        for r in used_chunks:
+                            meta_r = r["metadata"]
+                            key = (meta_r["file_path"], meta_r["start_line"], meta_r["end_line"])
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            sources_meta.append(meta_r)
+
+                        st.session_state.qa_answer = answer
+                        st.session_state.qa_sources = sources_meta
+                        # 🔐 Add this QA pair to semantic cache
+                        if q_emb is None:
+                            # If embedding failed earlier, compute once now
+                            try:
+                                q_emb = embed_query(q_norm)
+                            except Exception:
+                                q_emb = None
+
+                        if q_emb is not None:
+                            st.session_state.qa_semantic_cache.append(
+                                {
+                                    "repo_id": repo_id,
+                                    "index_version": index_version,
+                                    "question": q_norm,
+                                    "embedding": q_emb,
+                                    "answer": answer,
+                                    "sources": sources_meta,
+                                }
+                            )
 
         # ---- Render last answer + sources (SURVIVES reruns) ----
         if st.session_state.qa_answer:
@@ -332,6 +414,16 @@ def main():
     # Tab 2: PR Review
     # ------------------------
     with tab_pr:
+        # ---- Phase 6 state ----
+        if "pr_summary" not in st.session_state:
+            st.session_state.pr_summary = None
+        if "pr_comments" not in st.session_state:
+            st.session_state.pr_comments = []
+        if "pr_markdown" not in st.session_state:
+            st.session_state.pr_markdown = None
+        if "pr_number" not in st.session_state:
+            st.session_state.pr_number = None
+
         st.markdown("### AI PR Review")
 
         # List open PRs
@@ -348,6 +440,12 @@ def main():
             selected_idx = st.selectbox("Select a PR to review", list(range(len(prs))), format_func=lambda i: pr_labels[i])
             selected_pr: PRInfo = prs[selected_idx]
 
+            # Link to GitHub PR
+            st.markdown(
+                f"[Open PR in GitHub]({selected_pr.html_url})  \n"
+                f"Base: `{selected_pr.base_branch}` → Head: `{selected_pr.head_branch}`"
+            )
+            # --- Run review: compute + STORE ONLY ---
             if st.button("Run AI Review", key="run_pr_review"):
                 with st.spinner("Running AI code review..."):
                     try:
@@ -355,44 +453,112 @@ def main():
                         diff_chunks = build_diff_chunks_from_github_files(selected_pr.repo_id, selected_pr.number, files_json)
                         summary_text, comments = run_pr_review(repo_id, owner, name, selected_pr, diff_chunks)
 
+                        # Save to session state
+                        st.session_state.pr_summary = summary_text
+                        st.session_state.pr_comments = comments
+                        st.session_state.pr_number = selected_pr.number
                         # Save metrics
                         save_review_run(repo_id, selected_pr.number, summary_text, comments)
 
-                        st.subheader("AI Review Summary")
-                        st.write(summary_text)
-
-                        st.subheader("Review Comments")
-                        if not comments:
-                            st.write("No significant issues found by the AI reviewer.")
-                        else:
-                            # Group by file
-                            comments_by_file = {}
-                            for c in comments:
-                                comments_by_file.setdefault(c.file_path, []).append(c)
-
-                            for file_path, file_comments in comments_by_file.items():
-                                st.markdown(f"**{file_path}**")
-                                for c in file_comments:
-                                    st.markdown(
-                                        f"- Line {c.line} "
-                                        f"[{c.severity.upper()} / {c.category}] — {c.body}\n\n"
-                                        f"  _Why_: {c.rationale}"
-                                        + (f"\n\n  _Suggestion_: {c.suggestion}" if c.suggestion else "")
-                                    )
-
-                            # Optional: copy-friendly version
-                            st.markdown("#### Copy all comments (Markdown)")
-                            md_lines = []
-                            md_lines.append(f"AI Review for PR #{selected_pr.number} – {selected_pr.title}\n")
-                            for c in comments:
-                                md_lines.append(
-                                    f"- **{c.file_path}:{c.line}** "
-                                    f"[{c.severity.upper()}/{c.category}] – {c.body}"
-                                )
-                            st.code("\n".join(md_lines), language="markdown")
+                        # Build markdown and store it too
+                        md_lines = []
+                        md_lines.append(
+                            f"AI Review for PR #{selected_pr.number} – {selected_pr.title}\n"
+                        )
+                        for c in comments:
+                            md_lines.append(
+                                f"- **{c.file_path}:{c.line}** "
+                                f"[{c.severity.upper()}/{c.category}] – {c.body}"
+                            )
+                        st.session_state.pr_markdown = "\n".join(md_lines)
 
                     except Exception as e:
                         st.error(f"Failed to run PR review: {e}")
+
+                    # --- Render last review from session_state (survives reruns) ---
+            if st.session_state.pr_summary is not None:
+                summary_text = st.session_state.pr_summary
+                comments = st.session_state.pr_comments
+                full_review_md = st.session_state.pr_markdown
+
+                st.subheader("AI Review Summary")
+                st.write(summary_text)
+
+                st.subheader("Review Comments")
+                if not comments:
+                    st.write("No significant issues found by the AI reviewer.")
+                else:
+                    # Group by file
+                    comments_by_file = {}
+                    for c in comments:
+                        comments_by_file.setdefault(c.file_path, []).append(c)
+
+                    for file_path, file_comments in comments_by_file.items():
+                        st.markdown(f"**{file_path}**")
+                        for c in file_comments:
+                            st.markdown(
+                                f"- Line {c.line} "
+                                f"[{c.severity.upper()} / {c.category}] — {c.body}\n\n"
+                                f"  _Why_: {c.rationale}"
+                                + (f"\n\n  _Suggestion_: {c.suggestion}" if c.suggestion else "")
+                            )
+
+                    # Copy-friendly version
+                    st.markdown("#### Copy all comments (Markdown)")
+                    md_lines = []
+                    md_lines.append(f"AI Review for PR #{selected_pr.number} – {selected_pr.title}\n")
+                    for c in comments:
+                        md_lines.append(
+                            f"- **{c.file_path}:{c.line}** "
+                            f"[{c.severity.upper()}/{c.category}] – {c.body}"
+                        )
+                    full_review_md = "\n".join(md_lines)
+                    st.code(full_review_md, language="markdown")
+
+                    # ---------- Phase 6: Post review back to GitHub ----------
+                    st.subheader("Post review to GitHub")
+
+                    st.markdown(
+                        "This will post a single AI-generated review comment "
+                        "to the PR conversation on GitHub. "
+                    )
+
+                    confirm_post = st.checkbox(
+                        "I understand this will post a real comment to this PR on GitHub",
+                        key="confirm_post_comment",
+                    )
+
+                    if st.button(
+                        "Post AI Review Comment to GitHub", key="post_review_btn"
+                    ):
+                        if not confirm_post:
+                            st.warning(
+                                "Please check the confirmation box before posting."
+                            )
+                        else:
+                            try:
+                                resp = post_pr_issue_comment(
+                                    owner=owner,
+                                    repo=name,
+                                    pr_number=st.session_state.pr_number,
+                                    access_token=access_token,
+                                    body=full_review_md,
+                                )
+                                comment_url = resp.get("html_url")
+                                if comment_url:
+                                    st.success(
+                                        f"Posted review comment to GitHub: {comment_url}"
+                                    )
+                                else:
+                                    st.success(
+                                        "Posted review comment to GitHub."
+                                    )
+                            except Exception as e:
+                                st.error(
+                                    f"Failed to post review comment to GitHub: {e}"
+                                )
+
+                    
 
     # ------------------------
     # Tab 3: Quality Dashboard

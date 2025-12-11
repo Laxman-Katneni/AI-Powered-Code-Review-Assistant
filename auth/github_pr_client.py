@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 import requests
 
 from pr.models import PRInfo
+from utils.retry import with_retry
 
 GITHUB_API_BASE = "https://api.github.com"
 
@@ -17,6 +18,20 @@ def _auth_headers(access_token: str) -> Dict[str, str]:
     }
 
 
+
+
+@with_retry()
+def _get_with_retry(url: str, headers: dict, params: dict | None = None):
+    resp = requests.get(url, headers=headers, params=params, timeout=10)
+    resp.raise_for_status()
+    return resp
+
+
+@with_retry()
+def _post_with_retry(url: str, headers: dict, json_data: dict):
+    resp = requests.post(url, headers=headers, json=json_data, timeout=10)
+    resp.raise_for_status()
+    return resp
 
 # List open pull requests for a repo, sorted by most recently updated
 """
@@ -80,3 +95,26 @@ def get_pull_request_files(owner: str, repo: str, pr_number: int, access_token: 
         files.extend(batch)
         page += 1
     return files
+
+
+"""
+Post a single Markdown comment to the PR's conversation (Issues API)
+This is safer/simpler than inline diff comments for v1
+"""
+def post_pr_issue_comment(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    access_token: str,
+    body: str,
+) -> Dict[str, Any]:
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    resp = requests.post(
+        url,
+        headers=_auth_headers(access_token),
+        json={"body": body},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
