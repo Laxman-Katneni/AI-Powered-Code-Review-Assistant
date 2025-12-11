@@ -19,13 +19,15 @@ from ingestion.github_client import clone_or_update_repo, get_repo_local_path
 
 from auth.github_pr_client import list_pull_requests, get_pull_request_files, post_pr_issue_comment
 from pr.diff_ingestion import build_diff_chunks_from_github_files
-from pr.review_service import run_pr_review
+# from pr.review_service import run_pr_review  <-- REMOVED (Replaced by Graph)
 from metrics.store import save_review_run, load_review_runs
 from pr.models import PRInfo, ReviewComment
 import pandas as pd
 from typing import Optional, Dict, Any, List
 from math import sqrt
 from llm.embeddings import embed_query
+from graphs.pr_review_graph import build_pr_review_graph
+
 
 
 # ------------- Helpers -------------
@@ -219,6 +221,12 @@ def main():
         st.caption(f"Repo: {selected_full_name} • Index metadata unavailable")
 
     # TABS: Code Q&A, PR Review, Quality Dashboard
+    # Initialize PR review graph once per session
+    if "pr_review_graph" not in st.session_state:
+        st.session_state.pr_review_graph = build_pr_review_graph()
+
+    pr_review_graph = st.session_state.pr_review_graph
+    
     tab_chat, tab_pr, tab_dashboard = st.tabs(["💬 Code Q&A", "🔍 PR Review", "📊 Quality Dashboard"])
 
     # ------------------------
@@ -233,15 +241,6 @@ def main():
             st.session_state.qa_sources = []
         
         # Semantic cache: list of dicts
-        # each entry:
-        # {
-        #   "repo_id": str,
-        #   "index_version": str,
-        #   "question": str,
-        #   "embedding": list[float],
-        #   "answer": str,
-        #   "sources": list[meta dict],
-        # }
         if "qa_semantic_cache" not in st.session_state:
             st.session_state.qa_semantic_cache = []
 
@@ -360,7 +359,6 @@ def main():
 
             # Build Sources list
             st.markdown("#### Sources")
-
             
             # GitHub links for sources
             github_base = f"https://github.com/{owner}/{name}/blob/{branch}"
@@ -375,8 +373,6 @@ def main():
                 )
             
             # Code viewer
-
-            
             st.markdown("#### View source code")
 
             if sources_meta:
@@ -425,6 +421,8 @@ def main():
             st.session_state.pr_number = None
 
         st.markdown("### AI PR Review")
+        
+        
 
         # List open PRs
         try:
@@ -447,11 +445,33 @@ def main():
             )
             # --- Run review: compute + STORE ONLY ---
             if st.button("Run AI Review", key="run_pr_review"):
-                with st.spinner("Running AI code review..."):
+                with st.spinner("Analyzing PR with LangGraph workflow..."):
                     try:
                         files_json = get_pull_request_files(owner, name, selected_pr.number, access_token)
                         diff_chunks = build_diff_chunks_from_github_files(selected_pr.repo_id, selected_pr.number, files_json)
-                        summary_text, comments = run_pr_review(repo_id, owner, name, selected_pr, diff_chunks)
+                        
+                        # --- LANGGRAPH INVOCATION START ---
+                        initial_state = {
+                            "repo_id": repo_id,
+                            "owner": owner,
+                            "name": name,
+                            "pr": selected_pr,
+                            "diff_chunks": diff_chunks,
+                            "context_snippets": {},
+                            "raw_model_output": None,
+                            "summary_text": None,
+                            "comments": [],
+                            "error": None,
+                        }
+
+                        final_state = pr_review_graph.invoke(initial_state)
+
+                        if final_state.get("error"):
+                            raise RuntimeError(final_state["error"])
+
+                        summary_text = final_state.get("summary_text") or ""
+                        comments = final_state.get("comments") or []
+                        # --- LANGGRAPH INVOCATION END ---
 
                         # Save to session state
                         st.session_state.pr_summary = summary_text
@@ -475,7 +495,7 @@ def main():
                     except Exception as e:
                         st.error(f"Failed to run PR review: {e}")
 
-                    # --- Render last review from session_state (survives reruns) ---
+            # --- Render last review from session_state (survives reruns) ---
             if st.session_state.pr_summary is not None:
                 summary_text = st.session_state.pr_summary
                 comments = st.session_state.pr_comments
