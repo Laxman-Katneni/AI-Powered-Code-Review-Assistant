@@ -10,5 +10,7 @@ langchain
 langchain-community
 langchain-openai
 langchain-chroma
+langgraph
+langchain-core
 chromadb
 

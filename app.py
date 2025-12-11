@@ -27,6 +27,8 @@ from typing import Optional, Dict, Any, List
 from math import sqrt
 from llm.embeddings import embed_query
 from graphs.pr_review_graph import build_pr_review_graph
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from graphs.chat_graph import build_chat_graph
 
 
 
@@ -227,7 +229,10 @@ def main():
 
     pr_review_graph = st.session_state.pr_review_graph
     
-    tab_chat, tab_pr, tab_dashboard = st.tabs(["💬 Code Q&A", "🔍 PR Review", "📊 Quality Dashboard"])
+    tab_chat, tab_pr, tab_dashboard, tab_chat_graph = st.tabs(
+    ["💬 Code Q&A", "🔍 PR Review", "📊 Quality Dashboard", "🧠 Chat (LangGraph)"]
+    )
+
 
     # ------------------------
     # Tab 1: Code Q&A (your existing logic)
@@ -626,6 +631,86 @@ def main():
             st.subheader("Security vs Architecture (total)")
             st.bar_chart(df[["security", "architecture"]].sum())
 
+    # ------------------------
+    # Tab 4: LangGraph Chat
+    # ------------------------
+    with tab_chat_graph:
+        st.markdown("### 🧠 LangGraph Chat (multi-turn RAG over this repo)")
+
+        # One chat history per repo in this session
+        chat_state_key = f"lg_chat_history::{repo_id}"
+
+        if chat_state_key not in st.session_state:
+            st.session_state[chat_state_key] = []
+
+        history: List[Dict[str, str]] = st.session_state[chat_state_key]
+
+        # Build / cache a graph per repo
+        graph_key = f"lg_chat_graph::{repo_id}"
+        if graph_key not in st.session_state:
+            st.session_state[graph_key] = build_chat_graph(repo_id)
+        chat_graph = st.session_state[graph_key]
+
+        # Input box for this tab
+        user_message = st.text_input(
+            "Ask anything about this repo (multi-turn, LangGraph-powered)",
+            key="lg_chat_input",
+        )
+
+        if st.button("Send", key="lg_chat_send") and user_message.strip():
+            user_message = user_message.strip()
+
+            # 1) Build LangChain messages from history + new user turn
+            messages: List[Any] = [
+                SystemMessage(
+                    content=(
+                        "You are an AI code assistant helping with this GitHub repo. "
+                        "Use the provided repository context to answer questions precisely. "
+                        "If the codebase does not contain enough information to answer confidently, say so."
+                    )
+                )
+            ]
+
+            for turn in history:
+                if turn["role"] == "user":
+                    messages.append(HumanMessage(content=turn["content"]))
+                else:
+                    messages.append(AIMessage(content=turn["content"]))
+
+            messages.append(HumanMessage(content=user_message))
+
+            # 2) Run the LangGraph workflow
+            state = {"messages": messages}
+            result = chat_graph.invoke(state)
+
+            all_messages = result["messages"]
+
+            # 3) Extract the last assistant message as the new answer
+            last_assistant = None
+            for m in reversed(all_messages):
+                if isinstance(m, AIMessage):
+                    last_assistant = m
+                    break
+
+            if last_assistant is None:
+                answer_text = "I wasn't able to generate a response."
+            else:
+                answer_text = last_assistant.content
+
+            # 4) Update session history
+            history.append({"role": "user", "content": user_message})
+            history.append({"role": "assistant", "content": answer_text})
+            st.session_state[chat_state_key] = history
+
+        # ---- Render chat history ----
+        if history:
+            for turn in history:
+                if turn["role"] == "user":
+                    st.markdown(f"**You:** {turn['content']}")
+                else:
+                    st.markdown(f"**Assistant:** {turn['content']}")
+        else:
+            st.info("Start the conversation by asking a question about this repo.")
 
 
 if __name__ == "__main__":
