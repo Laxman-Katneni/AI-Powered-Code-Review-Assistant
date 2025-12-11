@@ -14,3 +14,5 @@ langgraph
 langchain-core
 chromadb
 
+fastapi 
+uvicorn
