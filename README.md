@@ -2,6 +2,8 @@
 
 An AI-powered system that connects directly to GitHub repositories to help developers **understand, review, and improve codebases** using Retrieval-Augmented Generation (RAG) and large language models.
 
+Does **PR(Pull Request) Review** on the selected PR and optionally posts the AI review back to GitHub as a PR comment
+
 This version is implemented using **Python + Streamlit** and serves as the functional reference and prototype for a future full-stack migration (React + Spring Boot).
 
 ---
