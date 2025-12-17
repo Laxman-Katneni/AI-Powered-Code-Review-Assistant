@@ -68,7 +68,7 @@ def main():
 
 
     st.title("RepoMind - An AI Code Review Assistant")
-    st.write("Welcome! This is the starting point for your codebase assistant")
+    st.write("Welcome! This is the starting point for your codebase assistant\nThis is only a Proof of Concept. The final version is going to be deployed soon.\n Stay tuned")
 
     # --- Handle OAuth callback ---
     query_params = st.query_params
